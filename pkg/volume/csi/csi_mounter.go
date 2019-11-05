@@ -29,7 +29,7 @@ import (
 	"k8s.io/klog"
 
 	api "k8s.io/api/core/v1"
-	storage "k8s.io/api/storage/v1beta1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -63,7 +63,7 @@ type csiMountMgr struct {
 	k8s                 kubernetes.Interface
 	plugin              *csiPlugin
 	driverName          csiDriverName
-	volumeLifecycleMode storage.VolumeLifecycleMode
+	volumeLifecycleMode storagev1.VolumeLifecycleMode
 	volumeID            string
 	specVolumeID        string
 	readOnly            bool
@@ -147,7 +147,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 		if !utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume) {
 			return fmt.Errorf("CSIInlineVolume feature required")
 		}
-		if c.volumeLifecycleMode != storage.VolumeLifecycleEphemeral {
+		if c.volumeLifecycleMode != storagev1.VolumeLifecycleEphemeral {
 			return fmt.Errorf("unexpected volume mode: %s", c.volumeLifecycleMode)
 		}
 		if volSrc.FSType != nil {
@@ -162,7 +162,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 			secretRef = &api.SecretReference{Name: secretName, Namespace: ns}
 		}
 	case pvSrc != nil:
-		if c.volumeLifecycleMode != storage.VolumeLifecyclePersistent {
+		if c.volumeLifecycleMode != storagev1.VolumeLifecyclePersistent {
 			return fmt.Errorf("unexpected driver mode: %s", c.volumeLifecycleMode)
 		}
 
@@ -326,7 +326,7 @@ func (c *csiMountMgr) podAttributes() (map[string]string, error) {
 		"csi.storage.k8s.io/serviceAccount.name": c.pod.Spec.ServiceAccountName,
 	}
 	if utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume) {
-		attrs["csi.storage.k8s.io/ephemeral"] = strconv.FormatBool(c.volumeLifecycleMode == storage.VolumeLifecycleEphemeral)
+		attrs["csi.storage.k8s.io/ephemeral"] = strconv.FormatBool(c.volumeLifecycleMode == storagev1.VolumeLifecycleEphemeral)
 	}
 
 	klog.V(4).Infof(log("CSIDriver %q requires pod information", c.driverName))

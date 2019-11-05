@@ -36,7 +36,6 @@ import (
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
-	storagelisters "k8s.io/client-go/listers/storage/v1beta1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	utiltesting "k8s.io/client-go/util/testing"
@@ -77,7 +76,7 @@ type fakeVolumeHost struct {
 	nodeLabels      map[string]string
 	nodeName        string
 	subpather       subpath.Interface
-	csiDriverLister storagelisters.CSIDriverLister
+	csiDriverLister storagelistersv1.CSIDriverLister
 	informerFactory informers.SharedInformerFactory
 }
 
@@ -98,7 +97,7 @@ func NewFakeVolumeHostWithNodeLabels(rootDir string, kubeClient clientset.Interf
 	return volHost
 }
 
-func NewFakeVolumeHostWithCSINodeName(rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, nodeName string, driverLister storagelisters.CSIDriverLister) *fakeVolumeHost {
+func NewFakeVolumeHostWithCSINodeName(rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, nodeName string, driverLister storagelistersv1.CSIDriverLister) *fakeVolumeHost {
 	volHost := newFakeVolumeHost(rootDir, kubeClient, plugins, nil, nil)
 	volHost.nodeName = nodeName
 	if driverLister != nil {
@@ -1501,7 +1500,7 @@ func ContainsAccessMode(modes []v1.PersistentVolumeAccessMode, mode v1.Persisten
 	return false
 }
 
-func (f *fakeVolumeHost) CSIDriverLister() storagelisters.CSIDriverLister {
+func (f *fakeVolumeHost) CSIDriverLister() storagelistersv1.CSIDriverLister {
 	return f.csiDriverLister
 }
 
