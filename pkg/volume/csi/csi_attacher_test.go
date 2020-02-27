@@ -347,9 +347,9 @@ func TestAttacherWithCSIDriver(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fakeClient := fakeclient.NewSimpleClientset(
-				getTestCSIDriver("not-attachable", nil, &bFalse, nil),
-				getTestCSIDriver("attachable", nil, &bTrue, nil),
-				getTestCSIDriver("nil", nil, nil, nil),
+				getTestCSIDriver("not-attachable", nil, &bFalse),
+				getTestCSIDriver("attachable", nil, &bTrue),
+				getTestCSIDriver("nil", nil, nil),
 			)
 			plug, fakeWatcher, tmpDir, _ := newTestWatchPlugin(t, fakeClient)
 			defer os.RemoveAll(tmpDir)
@@ -435,9 +435,9 @@ func TestAttacherWaitForVolumeAttachmentWithCSIDriver(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fakeClient := fakeclient.NewSimpleClientset(
-				getTestCSIDriver("not-attachable", nil, &bFalse, nil),
-				getTestCSIDriver("attachable", nil, &bTrue, nil),
-				getTestCSIDriver("nil", nil, nil, nil),
+				getTestCSIDriver("not-attachable", nil, &bFalse),
+				getTestCSIDriver("attachable", nil, &bTrue),
+				getTestCSIDriver("nil", nil, nil),
 				&v1.Node{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "fakeNode",
@@ -1553,7 +1553,7 @@ func newTestWatchPlugin(t *testing.T, fakeClient *fakeclient.Clientset) (*csiPlu
 
 	// Start informer for CSIDrivers.
 	factory := informers.NewSharedInformerFactory(fakeClient, CsiResyncPeriod)
-	csiDriverInformer := factory.Storage().V1beta1().CSIDrivers()
+	csiDriverInformer := factory.Storage().V1().CSIDrivers()
 	csiDriverLister := csiDriverInformer.Lister()
 	factory.Start(wait.NeverStop)
 

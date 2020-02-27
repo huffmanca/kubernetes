@@ -38,7 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
-	storagelisters "k8s.io/client-go/listers/storage/v1beta1"
+	storagelisters "k8s.io/client-go/listers/storage/v1"
 	csitranslationplugins "k8s.io/csi-translation-lib/plugins"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/volume"
@@ -355,17 +355,6 @@ func (p *csiPlugin) NewMounter(
 		return nil, errors.New(log("volume source not found in volume.Spec"))
 	}
 
-	volumeLifecycleMode, err := p.getVolumeLifecycleMode(spec)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check CSIDriver.Spec.Mode to ensure that the CSI driver
-	// supports the current volumeLifecycleMode.
-	if err := p.supportsVolumeLifecycleMode(driverName, volumeLifecycleMode); err != nil {
-		return nil, err
-	}
-
 	k8s := p.host.GetKubeClient()
 	if k8s == nil {
 		return nil, errors.New(log("failed to get a kubernetes client"))
@@ -377,17 +366,16 @@ func (p *csiPlugin) NewMounter(
 	}
 
 	mounter := &csiMountMgr{
-		plugin:              p,
-		k8s:                 k8s,
-		spec:                spec,
-		pod:                 pod,
-		podUID:              pod.UID,
-		driverName:          csiDriverName(driverName),
-		volumeLifecycleMode: volumeLifecycleMode,
-		volumeID:            volumeHandle,
-		specVolumeID:        spec.Name(),
-		readOnly:            readOnly,
-		kubeVolHost:         kvh,
+		plugin:       p,
+		k8s:          k8s,
+		spec:         spec,
+		pod:          pod,
+		podUID:       pod.UID,
+		driverName:   csiDriverName(driverName),
+		volumeID:     volumeHandle,
+		specVolumeID: spec.Name(),
+		readOnly:     readOnly,
+		kubeVolHost:  kvh,
 	}
 	mounter.csiClientGetter.driverName = csiDriverName(driverName)
 
@@ -405,11 +393,10 @@ func (p *csiPlugin) NewMounter(
 	// persist volume info data for teardown
 	node := string(p.host.GetNodeName())
 	volData := map[string]string{
-		volDataKey.specVolID:           spec.Name(),
-		volDataKey.volHandle:           volumeHandle,
-		volDataKey.driverName:          driverName,
-		volDataKey.nodeName:            node,
-		volDataKey.volumeLifecycleMode: string(volumeLifecycleMode),
+		volDataKey.specVolID:  spec.Name(),
+		volDataKey.volHandle:  volumeHandle,
+		volDataKey.driverName: driverName,
+		volDataKey.nodeName:   node,
 	}
 
 	attachID := getAttachmentName(volumeHandle, driverName, node)
@@ -467,16 +454,7 @@ func (p *csiPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.S
 	klog.V(4).Info(log("plugin.ConstructVolumeSpec extracted [%#v]", volData))
 
 	var spec *volume.Spec
-	inlineEnabled := utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume)
 
-	// If inlineEnabled is true and mode is VolumeLifecycleEphemeral,
-	// use constructVolSourceSpec to construct volume source spec.
-	// If inlineEnabled is false or mode is VolumeLifecyclePersistent,
-	// use constructPVSourceSpec to construct volume construct pv source spec.
-	if inlineEnabled && storage.VolumeLifecycleMode(volData[volDataKey.volumeLifecycleMode]) == storage.VolumeLifecycleEphemeral {
-		spec = p.constructVolSourceSpec(volData[volDataKey.specVolID], volData[volDataKey.driverName])
-		return spec, nil
-	}
 	spec = p.constructPVSourceSpec(volData[volDataKey.specVolID], volData[volDataKey.driverName], volData[volDataKey.volHandle])
 
 	return spec, nil
@@ -546,19 +524,6 @@ func (p *csiPlugin) NewDetacher() (volume.Detacher, error) {
 }
 
 func (p *csiPlugin) CanAttach(spec *volume.Spec) (bool, error) {
-	inlineEnabled := utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume)
-	if inlineEnabled {
-		volumeLifecycleMode, err := p.getVolumeLifecycleMode(spec)
-		if err != nil {
-			return false, err
-		}
-
-		if volumeLifecycleMode == storage.VolumeLifecycleEphemeral {
-			klog.V(5).Info(log("plugin.CanAttach = false, ephemeral mode detected for spec %v", spec.Name()))
-			return false, nil
-		}
-	}
-
 	pvSrc, err := getCSISourceFromSpec(spec)
 	if err != nil {
 		return false, err
@@ -580,16 +545,6 @@ func (p *csiPlugin) CanDeviceMount(spec *volume.Spec) (bool, error) {
 	if !inlineEnabled {
 		// No need to check anything, we assume it is a persistent volume.
 		return true, nil
-	}
-
-	volumeLifecycleMode, err := p.getVolumeLifecycleMode(spec)
-	if err != nil {
-		return false, err
-	}
-
-	if volumeLifecycleMode == storage.VolumeLifecycleEphemeral {
-		klog.V(5).Info(log("plugin.CanDeviceMount skipped ephemeral mode detected for spec %v", spec.Name()))
-		return false, nil
 	}
 
 	// Persistent volumes support device mount.
@@ -762,6 +717,7 @@ func (p *csiPlugin) skipAttach(driver string) (bool, error) {
 
 // supportsVolumeMode checks whether the CSI driver supports a volume in the given mode.
 // An error indicates that it isn't supported and explains why.
+/*
 func (p *csiPlugin) supportsVolumeLifecycleMode(driver string, volumeMode storage.VolumeLifecycleMode) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume) {
 		// Feature disabled, therefore only "persistent" volumes are supported.
@@ -775,7 +731,7 @@ func (p *csiPlugin) supportsVolumeLifecycleMode(driver string, volumeMode storag
 	// possible (we don't have the lister if CSIDriverRegistry is
 	// disabled) or the driver isn't found (CSIDriver is
 	// optional), but then only persistent volumes are supported.
-	var csiDriver *storage.CSIDriver
+	var csiDriver *storagev1.CSIDriver
 	if p.csiDriverLister != nil {
 		kletHost, ok := p.host.(volume.KubeletVolumeHost)
 		if ok {
@@ -807,6 +763,7 @@ func (p *csiPlugin) supportsVolumeLifecycleMode(driver string, volumeMode storag
 		return fmt.Errorf("volume mode %q not supported by driver %s (only supports %q)", volumeMode, driver, csiDriver.Spec.VolumeLifecycleModes)
 	}
 }
+*/
 
 // containsVolumeMode checks whether the given volume mode is listed.
 func containsVolumeMode(modes []storage.VolumeLifecycleMode, mode storage.VolumeLifecycleMode) bool {
