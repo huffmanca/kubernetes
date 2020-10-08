@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,8 @@ import (
 	e2eevents "k8s.io/kubernetes/test/e2e/framework/events"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
 	"k8s.io/kubernetes/test/e2e/storage/drivers"
 	"k8s.io/kubernetes/test/e2e/storage/testsuites"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
@@ -107,6 +110,7 @@ var _ = utils.SIGDescribe("CSI mock volume", func() {
 		// just disable resizing on driver it overrides enableResizing flag for CSI mock driver
 		disableResizingOnDriver bool
 		javascriptHooks         map[string]string
+		fsGroupPolicy           storagev1.FSGroupPolicy
 	}
 
 	type mockDriverSetup struct {
@@ -143,6 +147,7 @@ var _ = utils.SIGDescribe("CSI mock volume", func() {
 			EnableResizing:      tp.enableResizing,
 			EnableNodeExpansion: tp.enableNodeExpansion,
 			JavascriptHooks:     tp.javascriptHooks,
+			FSGroupPolicy:       tp.fsGroupPolicy,
 		}
 
 		// this just disable resizing on driver, keeping resizing on SC enabled.
@@ -215,6 +220,39 @@ var _ = utils.SIGDescribe("CSI mock volume", func() {
 			m.pods = append(m.pods, pod)
 		}
 		return pod, err
+	}
+
+	createPodWithFSGroup := func(fsGroup *int64) (*storagev1.StorageClass, *v1.PersistentVolumeClaim, *v1.Pod) {
+		ginkgo.By("Creating pod with fsGroup")
+		nodeSelection := m.config.ClientNodeSelection
+		var sc *storagev1.StorageClass
+		if dDriver, ok := m.driver.(testsuites.DynamicPVTestDriver); ok {
+			sc = dDriver.GetDynamicProvisionStorageClass(m.config, "")
+		}
+		scTest := testsuites.StorageClassTest{
+			Name:                 m.driver.GetDriverInfo().Name,
+			Provisioner:          sc.Provisioner,
+			Parameters:           sc.Parameters,
+			ClaimSize:            "1Gi",
+			ExpectedSize:         "1Gi",
+			DelayBinding:         m.tp.lateBinding,
+			AllowVolumeExpansion: m.tp.enableResizing,
+		}
+
+		class, claim, pod := startBusyBoxPod(f.ClientSet, scTest, nodeSelection, m.tp.scName, f.Namespace.Name, fsGroup)
+
+		if class != nil {
+			m.sc[class.Name] = class
+		}
+		if claim != nil {
+			m.pvcs = append(m.pvcs, claim)
+		}
+
+		if pod != nil {
+			m.pods = append(m.pods, pod)
+		}
+
+		return class, claim, pod
 	}
 
 	cleanup := func() {
@@ -1165,6 +1203,105 @@ var _ = utils.SIGDescribe("CSI mock volume", func() {
 			})
 		}
 	})
+
+	// These tests *only* work on a cluster which has the CSIVolumeFSGroupPolicy feature enabled.
+	ginkgo.Context("CSI FSGroupPolicy", func() {
+		tests := []struct {
+			name          string
+			fsGroupPolicy storagev1.FSGroupPolicy
+			modified      bool
+		}{
+			{
+				name:          "should modify fsGroup if fsGroupPolicy=default",
+				fsGroupPolicy: storagev1.ReadWriteOnceWithFSTypeFSGroupPolicy,
+				modified:      true,
+			},
+			{
+				name:          "should modify fsGroup if fsGroupPolicy=File",
+				fsGroupPolicy: storagev1.FileFSGroupPolicy,
+				modified:      true,
+			},
+			{
+				name:          "should not modify fsGroup if fsGroupPolicy=None",
+				fsGroupPolicy: storagev1.NoneFSGroupPolicy,
+				modified:      false,
+			},
+		}
+		for _, t := range tests {
+			test := t
+			ginkgo.It(test.name, func() {
+				if framework.NodeOSDistroIs("windows") {
+					e2eskipper.Skipf("FSGroupPolicy is only applied on linux nodes -- skipping")
+				}
+				init(testParameters{
+					disableAttach:  true,
+					registerDriver: true,
+					fsGroupPolicy:  test.fsGroupPolicy,
+				})
+				defer cleanup()
+
+				// kube-scheduler may need some time before it gets the CSIDriver object.
+				// Without them, scheduling doesn't run as expected by the test.
+				syncDelay := 5 * time.Second
+				time.Sleep(syncDelay)
+
+				fsGroupVal := int64(rand.Int63n(20000) + 1024)
+				fsGroup := &fsGroupVal
+
+				_, _, pod := createPodWithFSGroup(fsGroup) /* persistent volume */
+
+				mountPath := pod.Spec.Containers[0].VolumeMounts[0].MountPath
+				fileName := mountPath + "/" + f.UniqueName
+
+				waitCtx, cancel := context.WithTimeout(context.Background(), podStartTimeout)
+				defer cancel()
+				condition := anyOf(
+					podRunning(waitCtx, f.ClientSet, pod.Name, pod.Namespace),
+					// We only just created the CSIDriver objects, therefore
+					// we have to ignore all older events, plus the syncDelay as our
+					// safety margin.
+					podHasStorage(waitCtx, f.ClientSet, pod.Name, pod.Namespace, time.Now().Add(syncDelay)),
+				)
+				err := wait.PollImmediateUntil(poll, condition, waitCtx.Done())
+				framework.ExpectNoError(err, "failed to start pod")
+
+				// Inject the contents onto the mount
+				//tk := e2ekubectl.NewTestKubeconfig(framework.TestContext.CertDir, framework.TestContext.Host, framework.TestContext.KubeConfig, framework.TestContext.KubeContext, framework.TestContext.KubectlPath, pod.Namespace)
+				//err = tk.WriteFileViaContainer(pod.Name, pod.Spec.Containers[0].Name, fileName, "filecontents")
+				createFile := fmt.Sprintf("echo '%s' > '%s'; sync", "filecontents", fileName)
+				_, _, err = utils.PodExec(f, pod, createFile)
+				framework.ExpectNoError(err, "failed: writing the contents: %s", err)
+
+				// Delete the created file. This step is mandatory, as the mock driver
+				// won't clean up the contents automatically.
+				defer func() {
+					delete := fmt.Sprintf("rm -f %s", fileName)
+					_, _, err = utils.PodExec(f, pod, delete)
+					framework.ExpectNoError(err, "failed: deleting the file: %s", err)
+				}()
+
+				// Get the fsGroup from the created file
+				commands := fmt.Sprintf("ls -l %s", fileName)
+				stdout, _, err := utils.PodExec(f, pod, commands)
+				framework.ExpectNoError(err, "failed: getting fsgroup: %s", err)
+				fsGroupResult := getGroupID(stdout)
+
+				// Ensure that the fsGroup matches what we expect
+				if test.modified {
+					if fsGroupResult != strconv.FormatInt(*fsGroup, 10) {
+						framework.Failf("fsGroup does not match provided value. Expected: %v, got: %v", fsGroup, fsGroupResult)
+					}
+				} else {
+					if fsGroupResult != "root" {
+						framework.Failf("fsGroup has been modified from default. Expected: root, got: %v", fsGroupResult)
+					}
+				}
+
+				// The created resources will be removed by the cleanup() function,
+				// so need to delete anything here.
+			})
+		}
+	})
 })
 
 // A lot of this code was copied from e2e/framework. It would be nicer
@@ -1298,7 +1435,7 @@ func checkCSINodeForLimits(nodeName string, driverName string, cs clientset.Inte
 	return attachLimit, nil
 }
 
-func startPausePod(cs clientset.Interface, t testsuites.StorageClassTest, node e2epod.NodeSelection, scName, ns string) (*storagev1.StorageClass, *v1.PersistentVolumeClaim, *v1.Pod) {
+func createClaim(cs clientset.Interface, t testsuites.StorageClassTest, node e2epod.NodeSelection, scName, ns string) (*storagev1.StorageClass, *v1.PersistentVolumeClaim) {
 	class := newStorageClass(t, ns, "")
 	if scName != "" {
 		class.Name = scName
@@ -1323,9 +1460,21 @@ func startPausePod(cs clientset.Interface, t testsuites.StorageClassTest, node e
 		_, err = e2epv.WaitForPVClaimBoundPhase(cs, pvcClaims, framework.ClaimProvisionTimeout)
 		framework.ExpectNoError(err, "Failed waiting for PVC to be bound: %v", err)
 	}
+	return class, claim
+}
+
+func startPausePod(cs clientset.Interface, t testsuites.StorageClassTest, node e2epod.NodeSelection, scName, ns string) (*storagev1.StorageClass, *v1.PersistentVolumeClaim, *v1.Pod) {
+	class, claim := createClaim(cs, t, node, scName, ns)
 
 	pod, err := startPausePodWithClaim(cs, claim, node, ns)
-	framework.ExpectNoError(err, "Failed to create pod: %v", err)
+	framework.ExpectNoError(err, "Failed to create pause pod: %v", err)
+	return class, claim, pod
+}
+
+func startBusyBoxPod(cs clientset.Interface, t testsuites.StorageClassTest, node e2epod.NodeSelection, scName, ns string, fsGroup *int64) (*storagev1.StorageClass, *v1.PersistentVolumeClaim, *v1.Pod) {
+	class, claim := createClaim(cs, t, node, scName, ns)
+	pod, err := startBusyBoxPodWithClaim(cs, claim, node, ns, fsGroup)
+	framework.ExpectNoError(err, "Failed to create busybox pod: %v", err)
 	return class, claim, pod
 }
 
@@ -1348,6 +1497,17 @@ func startPausePodWithClaim(cs clientset.Interface, pvc *v1.PersistentVolumeClai
 			},
 		},
 		node, ns)
+}
+
+func startBusyBoxPodWithClaim(cs clientset.Interface, pvc *v1.PersistentVolumeClaim, node e2epod.NodeSelection, ns string, fsGroup *int64) (*v1.Pod, error) {
+	return startBusyBoxPodWithVolumeSource(cs,
+		v1.VolumeSource{
+			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+				ClaimName: pvc.Name,
+				ReadOnly:  false,
+			},
+		},
+		node, ns, fsGroup)
 }
 
 func startPausePodWithInlineVolume(cs clientset.Interface, inlineVolume *v1.CSIVolumeSource, node e2epod.NodeSelection, ns string) (*v1.Pod, error) {
@@ -1375,6 +1535,41 @@ func startPausePodWithVolumeSource(cs clientset.Interface, volumeSource v1.Volum
 						},
 					},
 				},
+			},
+			RestartPolicy: v1.RestartPolicyNever,
+			Volumes: []v1.Volume{
+				{
+					Name:         "my-volume",
+					VolumeSource: volumeSource,
+				},
+			},
+		},
+	}
+	e2epod.SetNodeSelection(&pod.Spec, node)
+	return cs.CoreV1().Pods(ns).Create(context.TODO(), pod, metav1.CreateOptions{})
+}
+
+func startBusyBoxPodWithVolumeSource(cs clientset.Interface, volumeSource v1.VolumeSource, node e2epod.NodeSelection, ns string, fsGroup *int64) (*v1.Pod, error) {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "pvc-volume-tester-",
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "volume-tester",
+					Image: framework.BusyBoxImage,
+					VolumeMounts: []v1.VolumeMount{
+						{
+							Name:      "my-volume",
+							MountPath: "/mnt/test",
+						},
+					},
+					Command: e2evolume.GenerateScriptCmd("while true ; do sleep 2; done"),
+				},
+			},
+			SecurityContext: &v1.PodSecurityContext{
+				FSGroup: fsGroup,
 			},
 			RestartPolicy: v1.RestartPolicyNever,
 			Volumes: []v1.Volume{
@@ -1602,4 +1797,13 @@ func getVolumeLimitFromCSINode(csiNode *storagev1.CSINode, driverName string) in
 		}
 	}
 	return 0
+}
+
+// Takes the output of ls and returns the groupId
+// Sample input:
+// -rw-rw-r--.  1 root 20148  1110 Oct 13 14:08 fileName.txt
+// Sample output:
+// 20148
+func getGroupID(line string) string {
+	return strings.Fields(line)[3]
 }
