@@ -403,7 +403,7 @@ func ValidateCSIDriver(csiDriver *storage.CSIDriver) field.ErrorList {
 
 // ValidateCSIDriverUpdate validates a CSIDriver.
 func ValidateCSIDriverUpdate(new, old *storage.CSIDriver) field.ErrorList {
-	allErrs := ValidateCSIDriver(new)
+	allErrs := apivalidation.ValidateObjectMetaUpdate(&new.ObjectMeta, &old.ObjectMeta, field.NewPath("metadata"))
 
 	// Spec is read-only
 	// If this ever relaxes in the future, make sure to increment the Generation number in PrepareForUpdate
@@ -462,7 +462,6 @@ var supportedFSGroupPolicy = sets.NewString(string(storage.ReadWriteOnceWithFSTy
 func validateFSGroupPolicy(fsGroupPolicy *storage.FSGroupPolicy, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if fsGroupPolicy == nil {
-		// This is not a required field, so if nothing is provided simply return
 		return allErrs
 	}
 
