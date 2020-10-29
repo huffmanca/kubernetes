@@ -1855,6 +1855,8 @@ func TestCSIDriverValidationUpdate(t *testing.T) {
 	attachNotRequired := false
 	podInfoOnMount := true
 	notPodInfoOnMount := false
+	invalidFSGroupPolicy := storage.ReadWriteOnceWithFSTypeFSGroupPolicy
+	invalidFSGroupPolicy = "invalid-mode"
 	old := storage.CSIDriver{
 		ObjectMeta: metav1.ObjectMeta{Name: driverName},
 		Spec: storage.CSIDriverSpec{
@@ -1867,11 +1869,26 @@ func TestCSIDriverValidationUpdate(t *testing.T) {
 		},
 	}
 
-	// Currently there is only one success case: exactly the same
-	// as the existing object.
-	successCases := []storage.CSIDriver{old}
+	// Currently we compare the object against itself
+	// and ensure updates succeed
+	successCases := []storage.CSIDriver{
+		old,
+		// An invalid FSGroupPolicy should still pass
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: driverName},
+			Spec: storage.CSIDriverSpec{
+				AttachRequired: &attachNotRequired,
+				PodInfoOnMount: &notPodInfoOnMount,
+				VolumeLifecycleModes: []storage.VolumeLifecycleMode{
+					storage.VolumeLifecycleEphemeral,
+					storage.VolumeLifecyclePersistent,
+				},
+				FSGroupPolicy: &invalidFSGroupPolicy,
+			},
+		},
+	}
 	for _, csiDriver := range successCases {
-		if errs := ValidateCSIDriverUpdate(&csiDriver, &old); len(errs) != 0 {
+		if errs := ValidateCSIDriverUpdate(&csiDriver, &csiDriver); len(errs) != 0 {
 			t.Errorf("expected success for %+v: %v", csiDriver, errs)
 		}
 	}
