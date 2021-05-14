@@ -19,7 +19,6 @@ package testsuites
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo"
@@ -184,6 +183,7 @@ func (s *snapshottableTestSuite) DefineTests(driver storageframework.TestDriver,
 			nodeName := pod.Spec.NodeName
 			gomega.Expect(nodeName).NotTo(gomega.BeEmpty(), "pod.Spec.NodeName must not be empty")
 
+			/*
 			ginkgo.By(fmt.Sprintf("[init] waiting until the node=%s is not using the volume=%s", nodeName, pv.Name))
 			success := storageutils.WaitUntil(framework.Poll, f.Timeouts.PVDelete, func() bool {
 				node, err := cs.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
@@ -196,7 +196,17 @@ func (s *snapshottableTestSuite) DefineTests(driver storageframework.TestDriver,
 					}
 				}
 				return true
+			})*/
+			ginkgo.By(fmt.Sprintf("[init] waiting until the VolumeAttachment is removed"))
+			success := storageutils.WaitUntil(framework.Poll, f.Timeouts.PVDelete, func() bool {
+				volumeAttachment, err := storageutils.GetVolumeAttachment(cs, pv, sc.Provisioner, config.ClientNodeSelection.Name)
+				if apierrors.IsNotFound(err) {
+					return true
+				}
+				framework.Logf("volumeAttachment %v still exists", volumeAttachment.Name) 
+				return false;
 			})
+
 			framework.ExpectEqual(success, true)
 		}
 
